@@ -16,7 +16,7 @@ Create your solution in a fork of this repository. Once you're ready to submit, 
   - Any assumptions or trade-offs you made
   - Anything else you'd like the reviewer to know
 -->
-(I'll treat this section like it's a full ReadMe for the project)
+I have littered the whole project with comments to explain thought process
 
 ## Architecture Overview
 
@@ -46,20 +46,13 @@ Queue -> CallProcessor
 ## Key Design Decisions
 
 ### Async Queue Pattern
-In production this would be an **AWS SQS FIFO queue** triggering a separate Lambda consumer. FIFO specifically because:
-- Exactly-once processing - no duplicate CDR enrichment
-- Maintains batch ordering
-- Supports 3000 messages/sec with batching — sufficient for our volume
-- Native integration with the AWS stack 
-
-### Async Queue Pattern
 The handler's only job is to validate and acknowledge receipt. Enrichment and storage happen asynchronously in the background via an in-memory queue. In production this would be an **AWS SQS FIFO queue** triggering a separate Lambda consumer.
 
 SQS FIFO was chosen specifically because:
 - Guarantees exactly-once processing - no duplicate CDR enrichment
 - Maintains batch ordering
-- Supports up to 3000 messages/sec with batching - sufficient for our volume
-- Native integration with Lambda and the rest of the AWS stack Smartnumbers uses
+- Supports 3000 messages/sec with batching - as SQS allows 10 messages per operation
+- Native integration with the AWS stack 
 
 ### Parallel Operator Lookups
 All operator lookups across the entire batch run concurrently using `Promise.allSettled`. For a batch of 10 records (20 lookups), total lookup time ≈ slowest single lookup (~300ms) rather than sequential time (~6000ms).
@@ -81,3 +74,9 @@ Two stores serve different query patterns:
 - **OpenSearch** - derived search index for complex cross-record queries and real-time fraud pattern detection. Enables queries like "all calls from US numbers to UK numbers in the last hour" which aren't possible in DynamoDB alone
 
 Both are written to in parallel after enrichment.
+
+## Dependencies
+
+**Papa Parse** (CSV parsing) - I try to keep dependencies to a minimum, so every package has to earn its keep. From doing research online, I chose Papa Parse because writing a custom CSV parser usually ends in tears. A simple .split(',') works fine right up until a user uploads a file with a comma inside a quoted string or weird line endings. Over the top for this take-home for sure - but as with every other decision, I wanted to build production-ready foundation, including handling edge cases early.
+
+**Jest + ts-jest** — Testing framework
