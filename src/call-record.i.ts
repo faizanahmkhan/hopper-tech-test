@@ -16,3 +16,9 @@ export interface EnrichedCallRecord extends CallRecord {
   toCountry?: string;
   estimatedCost?: number;
 }
+
+export interface OperatorInfo {
+  operator: string;
+  country: string;
+  estimatedCostPerMinute: number;
+}

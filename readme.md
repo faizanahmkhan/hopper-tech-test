@@ -60,7 +60,7 @@ SQS FIFO was chosen specifically because:
 
 All operator lookups across the entire batch run concurrently using `Promise.allSettled`. For a batch of 10 records (20 lookups), total lookup time ≈ slowest single lookup (~300ms) rather than sequential time (~6000ms).
 
-`Promise.allSettled` is used over `Promise.all` so a single failed lookup doesn't lose enrichment data for the rest of the batch.
+`Promise.allSettled` is used over `Promise.all` so a single failed lookup doesn't lose enrichment data for the rest of the batch. This also preserves input order, so failed enrichments can be matched back to their original record for the DLQ.
 
 ### Retry with Exponential Backoff
 
@@ -81,7 +81,7 @@ Both are written to in parallel after enrichment.
 
 ## Storage Architecture
 
-### Database — MockDatabase (→ DynamoDB)
+### Database — MockDatabase (DynamoDB)
 
 The mock uses an in-memory Map keyed by record ID. In production this would be replaced with DynamoDB using a single-table design:
 
