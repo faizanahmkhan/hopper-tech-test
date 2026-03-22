@@ -20,23 +20,22 @@ Create your solution in a fork of this repository. Once you're ready to submit, 
 
 ## Architecture Overview
 
-The core challenge is meeting the sub-500ms acknowledgment SLA while performing slow external API calls (operator lookups) and database writes. The solution decouples receipt acknowledgment from processing using an async queue pattern.
-
+The main constraint is the sub-500ms acknowledgment SLA — you can't do operator lookups and DB writes inside that window, so the handler just validates, enqueues and returns. Enrichment happens in the background.
 ```
 Upstream System
       |
 CallHandler.handleBatch()
       |
       |-- Parse & validate CSV (~5ms)
-      |-- Store invalid records -> Dead Letter Queue 
-      |-- Enqueue valid records -> Pushed to Queue (~1ms)
-      |-- Return { ok: true } (acknowledges receipt <500ms)
+      |-- Invalid records → Dead Letter Queue
+      |-- Valid records → Enqueued (~1ms)
+      |-- Return { ok: true }  ← <500ms
 
       (independently, in the background)
 
-Queue -> CallProcessor
+Queue → CallProcessor
       |
-      |-- All 20 operator lookups concurrently
+      |-- 20 operator lookups concurrently
       |     |-- lookupOperator(fromNumber)  x 10 records
       |     |-- lookupOperator(toNumber)    x 10 records
       |
@@ -44,41 +43,27 @@ Queue -> CallProcessor
       |-- Write to DB + Search Index in parallel
 ```
 
-In production this queue would be an **AWS SQS FIFO queue** triggering a separate Lambda consumer. The handler Lambda publishes and returns immediately — the consumer Lambda handles enrichment and storage independently.
-
+In production the in-memory queue would be SQS FIFO triggering a separate Lambda — the handler publishes and returns, the consumer does the heavy lifting.
 
 ## Key Design Decisions
 
 ### Async Queue Pattern
-
-The handler's only job is to validate and acknowledge receipt. Enrichment and storage happen asynchronously in the background. SQS FIFO was chosen specifically because:
-- Guarantees exactly-once processing — no duplicate CDR enrichment
-- Maintains batch ordering
-- Supports up to 3000 messages/sec with batching
-- Native integration with the AWS stack Smartnumbers uses
+The handler validates, enqueues and gets out of the way. SQS FIFO in production because it gives exactly-once processing (no duplicate enrichment), maintains ordering, and fits naturally into the AWS stack.
 
 ### Parallel Operator Lookups
+Every lookup across the whole batch runs concurrently. For 10 records that's 20 lookups running at once — total time ends up around the slowest single lookup (~300ms) instead of waiting on each one sequentially (~6,000ms).
 
-All operator lookups across the entire batch run concurrently using `Promise.allSettled`. For a batch of 10 records (20 lookups), total lookup time ≈ slowest single lookup (~300ms) rather than sequential (~6000ms).
-
-`Promise.allSettled` is used over `Promise.all` so a single failed lookup doesn't lose enrichment data for the rest of the batch. It also preserves input order so failed enrichments can be matched back to their original record for the DLQ.
+`Promise.allSettled` rather than `Promise.all` so one bad lookup doesn't tank the whole batch. It also preserves order, which matters when routing failures back to the DLQ.
 
 ### Retry with Exponential Backoff
-
-The operator lookup API has a ~5% failure rate. Each lookup is retried up to 3 times with exponential backoff (100ms, 200ms, 300ms) before being marked as failed. A partial enrichment (missing operator fields) is always preferred over losing the record entirely.
+The lookup API fails roughly 5% of the time so each call gets up to 3 retries with exponential backoff (100ms -> 200ms -> 400ms). A record with missing operator fields is still worth keeping — better than dropping it entirely.
 
 ### Dead Letter Pattern
-
-Invalid records are routed here rather than silently dropped. In production this would be an SQS Dead Letter Queue, keeping the error handling path decoupled from the main processing flow. CloudWatch alarms on DLQ depth would alert the ops team when records are backing up. The team can then inspect, fix, and reprocess as needed.
+Bad records go to the DLQ instead of disappearing silently. In production that's SQS DLQ with CloudWatch alarms on depth - ops gets alerted when things back up and can inspect and reprocess without any data being permanently lost.
 
 ### Storage: DynamoDB + OpenSearch
+DynamoDB as the source of truth for fast single-number lookups, OpenSearch alongside it for the queries DynamoDB can't handle — things like "all calls from US to UK numbers in the last hour" or aggregating by country for fraud detection. Both get written in parallel since they're completely independent.
 
-Two stores serve different query patterns:
-
-- **DynamoDB** - source of truth, fast single-number lookups (PK: phoneNumber, SK: callStartTime). Chosen for automatic scaling, single-digit millisecond reads and native AWS integration
-- **OpenSearch** - derived search index for complex cross-record queries and real-time fraud pattern detection. Enables queries like "all calls from US numbers to UK numbers in the last hour" which aren't possible in DynamoDB alone
-
-Both are written to in parallel after enrichment as they are independent operations.
 
 ## Running the Tests
 ```bash
@@ -88,17 +73,18 @@ npm test
 
 ## Dependencies
 
-**Papa Parse** (CSV parsing) - I try to keep dependencies to a minimum, so every package has to earn its keep. From doing research online, I chose Papa Parse because writing a custom CSV parser usually ends in tears. A simple `.split(',')` works fine right up until a user uploads a file with a comma inside a quoted string or weird line endings. Over the top for this take-home for sure - but as with every other decision, I wanted to build production-ready foundation, including handling edge cases early.
+**Papa Parse** — I try to keep dependencies minimal but CSV parsing is one where rolling your own usually ends in tears. A `.split(',')` gets you 80% of the way there until someone uploads a file with commas inside quoted fields or weird line endings. Overkill for a take-home, but felt wrong to cut corners on something that would bite you immediately in production.
 
-**Jest + ts-jest** — Testing framework
+**Jest + ts-jest** — testing framework
 
 ## AI Usage
 
-Claude was used to discuss and validate architectural decisions. All code has been reviewed and understood before submission. The architectural decisions, validation logic and overall structure reflect my own understanding of the problem — I was also asked to reason through each decision myself before seeing any implementation.
+Claude was used as a sounding board while working through the architecture and to assist with intial boilerplate.
+
 
 ## What I Would Add With More Time
 
-- **Redis caching on operator lookups** — the same phone numbers appear repeatedly across CDR batches. A cache would dramatically reduce API calls over time
-- **CloudWatch metrics** — emit structured metrics on batch processing time, lookup failure rates and DLQ depth with alarms so the team is alerted before failures become a pattern
-- **DLQ reprocessing** — a mechanism to replay records from the Dead Letter Store once upstream issues are resolved, so no data is permanently lost
-- **Integration tests** — testing the full flow from CSV ingestion through to storage
+- **Redis caching for operator lookups** — the same numbers will come up repeatedly across batches, no point hitting the API every time
+- **CloudWatch metrics** — processing time, lookup failure rates, DLQ depth. Alarms before things become a pattern rather than after
+- **DLQ reprocessing** — right now failed records sit in the store but there's no mechanism to replay them once the underlying issue is fixed
+- **Integration tests** — the unit tests cover the pieces, would want end-to-end coverage of the full ingestion flow
