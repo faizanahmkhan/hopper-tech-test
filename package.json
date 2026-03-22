@@ -19,11 +19,14 @@
   "type": "commonjs",
   "main": "index.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "jest"
   },
   "devDependencies": {
     "@tsconfig/recommended": "^1.0.13",
-    "@types/papaparse": "^5.5.2"
+    "@types/jest": "^30.0.0",
+    "@types/papaparse": "^5.5.2",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.6"
   },
   "dependencies": {
     "papaparse": "^5.5.3"

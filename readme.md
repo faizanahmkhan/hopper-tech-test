@@ -44,23 +44,24 @@ Queue -> CallProcessor
       |-- Write to DB + Search Index in parallel
 ```
 
+In production this queue would be an **AWS SQS FIFO queue** triggering a separate Lambda consumer. The handler Lambda publishes and returns immediately — the consumer Lambda handles enrichment and storage independently.
+
+
 ## Key Design Decisions
 
 ### Async Queue Pattern
 
-The handler's only job is to validate and acknowledge receipt. Enrichment and storage happen asynchronously in the background via an in-memory queue. In production this would be an **AWS SQS FIFO queue** triggering a separate Lambda consumer.
-
-SQS FIFO was chosen specifically because:
-- Guarantees exactly-once processing - no duplicate CDR enrichment
+The handler's only job is to validate and acknowledge receipt. Enrichment and storage happen asynchronously in the background. SQS FIFO was chosen specifically because:
+- Guarantees exactly-once processing — no duplicate CDR enrichment
 - Maintains batch ordering
-- Supports 3000 messages/sec with batching - as SQS allows 10 messages per operation
-- Native integration with the AWS stack 
+- Supports up to 3000 messages/sec with batching
+- Native integration with the AWS stack Smartnumbers uses
 
 ### Parallel Operator Lookups
 
-All operator lookups across the entire batch run concurrently using `Promise.allSettled`. For a batch of 10 records (20 lookups), total lookup time ≈ slowest single lookup (~300ms) rather than sequential time (~6000ms).
+All operator lookups across the entire batch run concurrently using `Promise.allSettled`. For a batch of 10 records (20 lookups), total lookup time ≈ slowest single lookup (~300ms) rather than sequential (~6000ms).
 
-`Promise.allSettled` is used over `Promise.all` so a single failed lookup doesn't lose enrichment data for the rest of the batch. This also preserves input order, so failed enrichments can be matched back to their original record for the DLQ.
+`Promise.allSettled` is used over `Promise.all` so a single failed lookup doesn't lose enrichment data for the rest of the batch. It also preserves input order so failed enrichments can be matched back to their original record for the DLQ.
 
 ### Retry with Exponential Backoff
 
@@ -77,38 +78,27 @@ Two stores serve different query patterns:
 - **DynamoDB** - source of truth, fast single-number lookups (PK: phoneNumber, SK: callStartTime). Chosen for automatic scaling, single-digit millisecond reads and native AWS integration
 - **OpenSearch** - derived search index for complex cross-record queries and real-time fraud pattern detection. Enables queries like "all calls from US numbers to UK numbers in the last hour" which aren't possible in DynamoDB alone
 
-Both are written to in parallel after enrichment.
+Both are written to in parallel after enrichment as they are independent operations.
 
-## Storage Architecture
-
-### Database — MockDatabase (DynamoDB)
-
-The mock uses an in-memory Map keyed by record ID. In production this would be replaced with DynamoDB using a single-table design:
-
-- **PK**: `phoneNumber`, **SK**: `callStartTime`
-- Fast lookups like "all calls from +14155551234 in the last 7 days"
-- `BatchWriteItem` for writes (up to 25 items per request)
-- TTL on records to automatically expire old CDR data
-- Native AWS integration with Lambda and SQS
-
-### Search Index — MockSearchIndex (OpenSearch)
-
-Mirrors the OpenSearch integration referenced in the job spec. The bulk API would be used for indexing; fraud detection queries would use the OpenSearch query DSL with `bool/should` term matching across `fromNumber` and `toNumber`.
-
-Field mappings in production:
-- `fromNumber`, `toNumber` — `keyword` (exact match)
-- `callStartTime` — `date` (range queries)
-- `fromCountry`, `toCountry` — `keyword` (aggregations)
-- `duration`, `estimatedCost` — `numeric` (aggregations)
-
-OpenSearch also enables Kibana dashboards for visualising call patterns and cross-record queries (e.g. "all calls from US numbers to UK numbers in the last hour").
-
-### Dead Letter Store — MockDeadLetterStore (SQS DLQ)
-
-Invalid records are routed here rather than silently dropped. In production this would be an SQS Dead Letter Queue, keeping the error handling path decoupled from the main processing flow. CloudWatch alarms on DLQ depth would alert the ops team when records are backing up. The team can then inspect, fix, and reprocess as needed.
+## Running the Tests
+```bash
+npm install
+npm test
+```
 
 ## Dependencies
 
-**Papa Parse** (CSV parsing) - I try to keep dependencies to a minimum, so every package has to earn its keep. From doing research online, I chose Papa Parse because writing a custom CSV parser usually ends in tears. A simple .split(',') works fine right up until a user uploads a file with a comma inside a quoted string or weird line endings. Over the top for this take-home for sure - but as with every other decision, I wanted to build production-ready foundation, including handling edge cases early.
+**Papa Parse** (CSV parsing) - I try to keep dependencies to a minimum, so every package has to earn its keep. From doing research online, I chose Papa Parse because writing a custom CSV parser usually ends in tears. A simple `.split(',')` works fine right up until a user uploads a file with a comma inside a quoted string or weird line endings. Over the top for this take-home for sure - but as with every other decision, I wanted to build production-ready foundation, including handling edge cases early.
 
 **Jest + ts-jest** — Testing framework
+
+## AI Usage
+
+Claude was used to discuss and validate architectural decisions. All code has been reviewed and understood before submission. The architectural decisions, validation logic and overall structure reflect my own understanding of the problem — I was also asked to reason through each decision myself before seeing any implementation.
+
+## What I Would Add With More Time
+
+- **Redis caching on operator lookups** — the same phone numbers appear repeatedly across CDR batches. A cache would dramatically reduce API calls over time
+- **CloudWatch metrics** — emit structured metrics on batch processing time, lookup failure rates and DLQ depth with alarms so the team is alerted before failures become a pattern
+- **DLQ reprocessing** — a mechanism to replay records from the Dead Letter Store once upstream issues are resolved, so no data is permanently lost
+- **Integration tests** — testing the full flow from CSV ingestion through to storage
